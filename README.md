@@ -14,7 +14,9 @@ cd /path/to/demo-timeskipping-sa
 TEMPORAL_SOURCE="/absolute/path/to/temporal" ./start-server.sh
 ```
 
-## Create the three examples
+After server changes, restart the demo server to recreate its in-memory SQLite schema.
+
+## Create the examples
 
 In another terminal:
 
@@ -23,13 +25,21 @@ cd /path/to/demo-timeskipping-sa
 ./run-workflows.sh
 ```
 
-Namespace: `time-skipping-sa-demo`. All three workflows stay Running with an unexecuted activity.
+Namespace: `time-skipping-sa-demo`. The program creates five workflows and waits until visibility shows the expected attributes.
 
-| Workflow suffix | Enabled | OnceEnabled |
-| --- | --- | --- |
-| `-missing` | missing | missing |
-| `-false` | false | false |
-| `-true` | true | true |
+| Workflow suffix | Status | Enabled | AccumulatedDuration (nanoseconds) |
+| --- | --- | --- | --- |
+| `-missing` | Running | missing | missing |
+| `-false` | Running | false | 0 |
+| `-true` | Running | true | 0 |
+| `-skipped-disabled` | Running | false | > 0 |
+| `-skipped-completed` | Completed | true | > 0 |
+
+The first three workflows retain an unexecuted activity. The last two skip a one-hour timer. `-skipped-disabled` reaches `MaxSessionSkipCount = 1`, which disables time skipping; its timer-fired workflow task remains unhandled. `-skipped-completed` handles that task and completes. Each workflow has its own task queue.
+
+`TemporalTimeSkippingAccumulatedDuration` is an Int search attribute measured in **nanoseconds**, including inherited skipped duration. It is carried by the existing start, enabled-to-disabled, and close visibility writes; individual skips do not trigger extra visibility writes. Other visibility upserts also carry the latest total. The recorded skip can be slightly less than one hour because wall-clock time elapsed before skipping.
+
+The enabled attribute reflects the configuration, so a completed workflow can still have `TemporalTimeSkippingEnabled = true`.
 
 ## Search via HTTP List API
 
@@ -40,7 +50,7 @@ Namespace: `time-skipping-sa-demo`. All three workflows stay Running with an une
 # true
 ./list-workflows.sh "TemporalTimeSkippingEnabled = true"
 
-# false only: does not match missing.
+# Disabled config: matches -false and -skipped-disabled, excluding missing.
 ./list-workflows.sh "TemporalTimeSkippingEnabled = false"
 
 # missing only
@@ -49,11 +59,17 @@ Namespace: `time-skipping-sa-demo`. All three workflows stay Running with an une
 # false or missing
 ./list-workflows.sh "TemporalTimeSkippingEnabled = false OR TemporalTimeSkippingEnabled IS NULL"
 
-# OnceEnabled
-./list-workflows.sh "TemporalTimeSkippingOnceEnabled = true"
+# Nonzero skipped duration: both timer examples, including the completed one.
+./list-workflows.sh "TemporalTimeSkippingAccumulatedDuration > 0"
+
+# Disabled after actually skipping time.
+./list-workflows.sh "TemporalTimeSkippingEnabled = false AND TemporalTimeSkippingAccumulatedDuration > 0"
+
+# Completed with a recorded duration.
+./list-workflows.sh "ExecutionStatus = 'Completed' AND TemporalTimeSkippingAccumulatedDuration > 0"
 ```
 
-To list only the latest three workflows, use the group query printed by `run-workflows.sh`:
+To list only the latest five workflows, use the group query printed by `run-workflows.sh`:
 
 ```bash
 ./list-workflows.sh "WorkflowId STARTS_WITH 'sa-demo-<printed-prefix>'"
@@ -63,7 +79,7 @@ HTTP endpoint: `GET http://127.0.0.1:7243/api/v1/namespaces/time-skipping-sa-dem
 
 ## Raw response example
 
-One complete execution object from `ListWorkflowExecutionsResponse.executions`:
+Illustrative execution object for the `-true` example from `ListWorkflowExecutionsResponse.executions`:
 
 ```json
 {
@@ -94,16 +110,16 @@ One complete execution object from `ListWorkflowExecutionsResponse.executions`:
         },
         "data": "dHJ1ZQ=="
       },
-      "TemporalTimeSkippingOnceEnabled": {
+      "TemporalTimeSkippingAccumulatedDuration": {
         "metadata": {
           "encoding": "anNvbi9wbGFpbg==",
-          "type": "Qm9vbA=="
+          "type": "SW50"
         },
-        "data": "dHJ1ZQ=="
+        "data": "MA=="
       }
     }
   },
-  "taskQueue": "sa-demo-1795544555134238000-workflow",
+  "taskQueue": "sa-demo-1795544555134238000-true-workflow",
   "rootExecution": {
     "workflowId": "sa-demo-1795544555134238000-true",
     "runId": "01a20ecb-9e8b-77d0-b142-8f4ecda6ca55"
@@ -117,23 +133,25 @@ Payload metadata and data are byte fields, represented as Base64 in this HTTP re
 | --- | --- | --- |
 | `metadata.encoding` | `anNvbi9wbGFpbg==` | `json/plain`: the data contains JSON |
 | `metadata.type` | `Qm9vbA==` | `Bool`: the search attribute type |
-| `data` on `-true` | `dHJ1ZQ==` | `true` |
-| `data` on `-false` | `ZmFsc2U=` | `false` |
+| enabled `data` on `-true` | `dHJ1ZQ==` | `true` |
+| enabled `data` on `-false` | `ZmFsc2U=` | `false` |
+| duration `metadata.type` | `SW50` | `Int` |
+| duration `data` on `-true` | `MA==` | `0` nanoseconds |
 
-On `-missing`, the entire `TemporalTimeSkippingEnabled` entry is absent. `OnceEnabled` follows the same three cases in this demo.
+On `-missing`, both time-skipping search attribute entries are absent.
 
 ## Temporal CLI and tdbg use cases
 
 ### Temporal CLI
 
 ```bash
-# Currently enabled: matches the -true example.
+# Enabled config: matches -true and -skipped-completed.
 temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow list \
   --query 'TemporalTimeSkippingEnabled = true'
 
-# Ever enabled: matches the -true example.
+# Actually skipped time: matches both timer examples.
 temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow list \
-  --query 'TemporalTimeSkippingOnceEnabled = true'
+  --query 'TemporalTimeSkippingAccumulatedDuration > 0'
 ```
 
 ### tdbg
@@ -141,37 +159,37 @@ temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow lis
 Use a tdbg build that includes `visibility list`.
 
 ```bash
-# Currently enabled: matches the -true example.
+# Enabled config: matches -true and -skipped-completed.
 tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
   --query 'TemporalTimeSkippingEnabled = true'
 
-# Ever enabled: matches the -true example.
+# Actually skipped time: matches both timer examples.
 tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
-  --query 'TemporalTimeSkippingOnceEnabled = true'
+  --query 'TemporalTimeSkippingAccumulatedDuration > 0'
 ```
 
-Both commands accept the same filters as the HTTP examples above: `= false` matches only `-false`; `IS NULL` matches only `-missing`.
+Both commands accept the same filters as the HTTP examples above: `TemporalTimeSkippingEnabled = false` matches `-false` and `-skipped-disabled`; `TemporalTimeSkippingEnabled IS NULL` matches only `-missing`.
 
-To find workflows that were enabled and are now disabled, use:
+To find workflows that skipped time and are now disabled, use:
 
 ```sql
-TemporalTimeSkippingOnceEnabled = true AND TemporalTimeSkippingEnabled = false
+TemporalTimeSkippingAccumulatedDuration > 0 AND TemporalTimeSkippingEnabled = false
 ```
 
-The three demo workflows do not include this last case, so it returns no matches.
+This matches `-skipped-disabled`. A zero accumulated duration does not indicate whether time skipping was enabled in the past.
 
-### Delete workflows with time skipping once enabled
+### Delete one demo group
+
+Use the exact group prefix printed by the program:
 
 ```bash
 temporal --address 127.0.0.1:7233 \
   --namespace time-skipping-sa-demo workflow delete \
-  --query 'TemporalTimeSkippingOnceEnabled = true' \
+  --query "WorkflowId STARTS_WITH 'sa-demo-<printed-prefix>'" \
   --reason 'Local demo cleanup' --yes
 ```
 
-This starts an asynchronous batch deletion of workflows that have ever had time skipping enabled, including those now disabled. In this demo, it deletes the `-true` example and keeps `-false` and `-missing`.
-
-Check progress using the job ID printed by the command:
+This starts an asynchronous batch deletion for that demo group. Check progress using the printed job ID:
 
 ```bash
 temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo \
