@@ -121,3 +121,59 @@ Payload metadata and data are byte fields, represented as Base64 in this HTTP re
 | `data` on `-false` | `ZmFsc2U=` | `false` |
 
 On `-missing`, the entire `TemporalTimeSkippingEnabled` entry is absent. `OnceEnabled` follows the same three cases in this demo.
+
+## Temporal CLI and tdbg use cases
+
+### Temporal CLI
+
+```bash
+# Currently enabled: matches the -true example.
+temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow list \
+  --query 'TemporalTimeSkippingEnabled = true'
+
+# Ever enabled: matches the -true example.
+temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow list \
+  --query 'TemporalTimeSkippingOnceEnabled = true'
+```
+
+### tdbg
+
+Use a tdbg build that includes `visibility list`.
+
+```bash
+# Currently enabled: matches the -true example.
+tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
+  --query 'TemporalTimeSkippingEnabled = true'
+
+# Ever enabled: matches the -true example.
+tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
+  --query 'TemporalTimeSkippingOnceEnabled = true'
+```
+
+Both commands accept the same filters as the HTTP examples above: `= false` matches only `-false`; `IS NULL` matches only `-missing`.
+
+To find workflows that were enabled and are now disabled, use:
+
+```sql
+TemporalTimeSkippingOnceEnabled = true AND TemporalTimeSkippingEnabled = false
+```
+
+The three demo workflows do not include this last case, so it returns no matches.
+
+### Delete workflows with time skipping once enabled
+
+```bash
+temporal --address 127.0.0.1:7233 \
+  --namespace time-skipping-sa-demo workflow delete \
+  --query 'TemporalTimeSkippingOnceEnabled = true' \
+  --reason 'Local demo cleanup' --yes
+```
+
+This starts an asynchronous batch deletion of workflows that have ever had time skipping enabled, including those now disabled. In this demo, it deletes the `-true` example and keeps `-false` and `-missing`.
+
+Check progress using the job ID printed by the command:
+
+```bash
+temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo \
+  batch describe --job-id <job-id>
+```
