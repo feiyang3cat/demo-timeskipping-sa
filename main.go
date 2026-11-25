@@ -174,18 +174,17 @@ func main() {
 				}
 				fields := visible.GetSearchAttributes().GetIndexedFields()
 				if tc.config == nil {
-					if fields["TemporalTimeSkippingEnabled"] != nil || fields["TemporalTimeSkippingAccumulatedDuration"] != nil {
+					if fields["TimeSkippingEnabled"] != nil || fields["TimeSkippingHasSkippedDuration"] != nil {
 						return fmt.Errorf("unexpected time-skipping attributes for %s", id)
 					}
 					continue
 				}
 				enabled := tc.config.GetEnabled() && tc.config.GetMaxSessionSkipCount() != 1
-				if string(fields["TemporalTimeSkippingEnabled"].GetData()) != strconv.FormatBool(enabled) {
+				if string(fields["TimeSkippingEnabled"].GetData()) != strconv.FormatBool(enabled) {
 					return fmt.Errorf("visibility enabled attribute not updated for %s", id)
 				}
-				skipped, err := strconv.ParseInt(string(fields["TemporalTimeSkippingAccumulatedDuration"].GetData()), 10, 64)
-				if err != nil || (!tc.timer && skipped != 0) || (tc.timer && (skipped <= 0 || skipped > time.Hour.Nanoseconds())) {
-					return fmt.Errorf("unexpected accumulated duration for %s: %d ns (%v)", id, skipped, err)
+				if string(fields["TimeSkippingHasSkippedDuration"].GetData()) != strconv.FormatBool(tc.timer) {
+					return fmt.Errorf("visibility has-skipped-duration attribute not updated for %s", id)
 				}
 				if tc.complete && visible.GetStatus() != enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED {
 					return fmt.Errorf("visibility completion not updated for %s", id)
@@ -196,16 +195,46 @@ func main() {
 	}))
 	for _, visible := range listed.GetExecutions() {
 		fields := visible.GetSearchAttributes().GetIndexedFields()
-		enabled, accumulated := "missing", "missing"
-		if value := fields["TemporalTimeSkippingEnabled"]; value != nil {
+		enabled, hasSkipped := "missing", "missing"
+		if value := fields["TimeSkippingEnabled"]; value != nil {
 			enabled = string(value.GetData())
 		}
-		if value := fields["TemporalTimeSkippingAccumulatedDuration"]; value != nil {
-			accumulated = string(value.GetData()) + " ns"
+
+		if value := fields["TimeSkippingHasSkippedDuration"]; value != nil {
+			hasSkipped = string(value.GetData())
 		}
-		fmt.Printf("Visible %s: enabled=%s, accumulatedDuration=%s\n", visible.GetExecution().GetWorkflowId(), enabled, accumulated)
+		fmt.Printf("Visible %s: enabled=%s, hasSkippedDuration=%s\n", visible.GetExecution().GetWorkflowId(), enabled, hasSkipped)
 	}
-	fmt.Println("Verified enabled and accumulated duration in visibility for all five workflows.")
+	for _, filter := range []struct {
+		query string
+		count int64
+	}{
+		{"TimeSkippingEnabled = true", 2},
+		{"TimeSkippingEnabled = false", 2},
+		{"TimeSkippingHasSkippedDuration = true", 2},
+		{"TimeSkippingHasSkippedDuration = false", 2},
+		{"TimeSkippingHasSkippedDuration IS NULL", 1},
+		{"TimeSkippingEnabled = false AND TimeSkippingHasSkippedDuration = true", 1},
+		{"TimeSkippingEnabled = true AND TimeSkippingHasSkippedDuration = false", 1},
+	} {
+		filterQuery := query + " AND " + filter.query
+		check(retry(ctx, func() error {
+			result, err := client.ListWorkflowExecutions(ctx, &workflowservice.ListWorkflowExecutionsRequest{Namespace: *namespace, Query: filterQuery})
+			if err != nil {
+				return err
+			}
+			count, err := client.CountWorkflowExecutions(ctx, &workflowservice.CountWorkflowExecutionsRequest{Namespace: *namespace, Query: filterQuery})
+			if err != nil {
+				return err
+			}
+			if int64(len(result.GetExecutions())) != filter.count || count.GetCount() != filter.count {
+				return fmt.Errorf("filter %q: list=%d count=%d, want %d", filter.query, len(result.GetExecutions()), count.GetCount(), filter.count)
+			}
+			return nil
+		}))
+		fmt.Printf("Verified filter %s: %d workflows\n", filter.query, filter.count)
+	}
+	fmt.Println("Verified both boolean attributes and list/count filters for all five workflows.")
 	fmt.Printf("\nNamespace: %s; gRPC address: %s\n", *namespace, *address)
 	fmt.Printf("List this group separately:\n  NAMESPACE=%q ./list-workflows.sh %q\n", *namespace,
 		fmt.Sprintf("WorkflowId STARTS_WITH '%s'", prefix))

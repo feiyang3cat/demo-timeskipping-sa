@@ -1,20 +1,16 @@
-# Time-skipping Search Attributes demo
+# Time-skipping search attributes demo
 
-## Download the server branch
+## Download and start the server
 
 ```bash
-git clone --single-branch --branch tsk-search-attributes-code \
+git clone --single-branch --branch tsk-compacted-search-attributes-code \
   https://github.com/temporalio/temporal.git temporal
-```
 
-## Start the server
-
-```bash
 cd /path/to/demo-timeskipping-sa
 TEMPORAL_SOURCE="/absolute/path/to/temporal" ./start-server.sh
 ```
 
-After server changes, restart the demo server to recreate its in-memory SQLite schema.
+Restart the demo server after schema changes to recreate its in-memory SQLite database.
 
 ## Create the examples
 
@@ -25,173 +21,119 @@ cd /path/to/demo-timeskipping-sa
 ./run-workflows.sh
 ```
 
-Namespace: `time-skipping-sa-demo`. The program creates five workflows and waits until visibility shows the expected attributes.
+Namespace: `time-skipping-sa-demo`. The program creates five workflows, verifies their visible Boolean attributes, and checks seven List/Count filters.
 
-| Workflow suffix | Status | Enabled | AccumulatedDuration (nanoseconds) |
+| Workflow suffix | Status | TimeSkippingEnabled | TimeSkippingHasSkippedDuration |
 | --- | --- | --- | --- |
 | `-missing` | Running | missing | missing |
-| `-false` | Running | false | 0 |
-| `-true` | Running | true | 0 |
-| `-skipped-disabled` | Running | false | > 0 |
-| `-skipped-completed` | Completed | true | > 0 |
+| `-false` | Running | false | false |
+| `-true` | Running | true | false |
+| `-skipped-disabled` | Running | false | true |
+| `-skipped-completed` | Completed | true | true |
 
-The first three workflows retain an unexecuted activity. The last two skip a one-hour timer. `-skipped-disabled` reaches `MaxSessionSkipCount = 1`, which disables time skipping; its timer-fired workflow task remains unhandled. `-skipped-completed` handles that task and completes. Each workflow has its own task queue.
+The first three workflows wait on an unexecuted activity. The last two skip a one-hour timer. `-skipped-disabled` reaches `MaxSessionSkipCount = 1`, which disables skipping; its timer-fired workflow task remains unhandled. `-skipped-completed` handles that task and completes. Each workflow uses its own task queue.
 
-`TemporalTimeSkippingAccumulatedDuration` is an Int search attribute measured in **nanoseconds**, including inherited skipped duration. It is carried by the existing start, enabled-to-disabled, and close visibility writes; individual skips do not trigger extra visibility writes. Other visibility upserts also carry the latest total. The recorded skip can be slightly less than one hour because wall-clock time elapsed before skipping.
+`TimeSkippingEnabled` reflects the configuration, so a completed workflow can still return true. `TimeSkippingHasSkippedDuration` is true when the mutable state's accumulated skipped duration is positive, including inherited skipped time. The numeric duration is not a visibility search attribute.
 
-The enabled attribute reflects the configuration, so a completed workflow can still have `TemporalTimeSkippingEnabled = true`.
+## Storage and refresh behavior
+
+Only `TemporalTimeSkippingState` is stored and indexed. Its first character represents enabled, and its second represents has-skipped-duration. `T` means true and `F` means false: `FF`, `FT`, `TF`, or `TT`.
+
+Both public Boolean fields share this Keyword index. The server converts Boolean queries to keyword conditions and decodes the stored state into the two Boolean fields in responses. Users do not need to enter the encoded state.
+
+MySQL and PostgreSQL use `VARCHAR(255)`, matching existing Keyword columns and leaving capacity beyond today's two-character format. Future format changes must update readers and query conversion to support old and new encodings before writers change the layout.
+
+The state refreshes on workflow start, enabled-state changes, close, and other visibility writes. Individual skips do not trigger extra visibility writes, so an actively skipping workflow's flag may lag until the next write. Workflows without `TimeSkippingInfo` have no state or Boolean attributes; use `IS NULL` to find them.
+
+## Web UI flag (no time-skipping filter)
+
+The Web UI reads `TimeSkippingEnabled` from each workflow's returned search attributes. It does not need a time-skipping query condition or `TimeSkippingHasSkippedDuration` to show the flag.
+
+```bash
+./list-workflows.sh | python3 show-ui-flags.py
+```
+
+This lists running workflows without a time-skipping filter. The helper decodes the `TimeSkippingEnabled` payload in the HTTP response and shows the flag only when its Boolean value is `true`. Both `false` and a missing attribute hide the flag; a missing value stays `null` in the output.
+
+For all five workflows from one run, including the completed workflow:
+
+```bash
+./list-workflows.sh "WorkflowId STARTS_WITH 'sa-demo-<printed-prefix>'" | python3 show-ui-flags.py
+```
+
+Expected flag: shown for `-true` and `-skipped-completed`, hidden for `-missing`, `-false`, and `-skipped-disabled`. The completed workflow still has its time-skipping configuration enabled.
+
+The helper uses the default `application/json+no-payload-shorthand` response format from `list-workflows.sh` and Python 3. Each invocation processes the returned page; use `NEXT_PAGE_TOKEN` to fetch additional pages.
 
 ## Search via HTTP List API
 
 ```bash
-# List running workflows; returns the raw HTTP JSON response.
 ./list-workflows.sh
 
-# true
-./list-workflows.sh "TemporalTimeSkippingEnabled = true"
+# Currently enabled: -true and -skipped-completed.
+./list-workflows.sh "TimeSkippingEnabled = true"
 
-# Disabled config: matches -false and -skipped-disabled, excluding missing.
-./list-workflows.sh "TemporalTimeSkippingEnabled = false"
+# Disabled: -false and -skipped-disabled; missing is excluded.
+./list-workflows.sh "TimeSkippingEnabled = false"
 
-# missing only
-./list-workflows.sh "TemporalTimeSkippingEnabled IS NULL"
+# Has actually skipped time: both timer examples.
+./list-workflows.sh "TimeSkippingHasSkippedDuration = true"
 
-# false or missing
-./list-workflows.sh "TemporalTimeSkippingEnabled = false OR TemporalTimeSkippingEnabled IS NULL"
+# Has no skipped duration: -false and -true; missing is excluded.
+./list-workflows.sh "TimeSkippingHasSkippedDuration = false"
 
-# Nonzero skipped duration: both timer examples, including the completed one.
-./list-workflows.sh "TemporalTimeSkippingAccumulatedDuration > 0"
+# No time-skipping information: -missing.
+./list-workflows.sh "TimeSkippingEnabled IS NULL"
 
-# Disabled after actually skipping time.
-./list-workflows.sh "TemporalTimeSkippingEnabled = false AND TemporalTimeSkippingAccumulatedDuration > 0"
+# Disabled after actually skipping time: -skipped-disabled.
+./list-workflows.sh "TimeSkippingEnabled = false AND TimeSkippingHasSkippedDuration = true"
 
-# Completed with a recorded duration.
-./list-workflows.sh "ExecutionStatus = 'Completed' AND TemporalTimeSkippingAccumulatedDuration > 0"
+# Completed after skipping time: -skipped-completed.
+./list-workflows.sh "ExecutionStatus = 'Completed' AND TimeSkippingHasSkippedDuration = true"
 ```
 
-To list only the latest five workflows, use the group query printed by `run-workflows.sh`:
-
-```bash
-./list-workflows.sh "WorkflowId STARTS_WITH 'sa-demo-<printed-prefix>'"
-```
+To restrict results to one demo run, add the `WorkflowId STARTS_WITH 'sa-demo-<printed-prefix>'` condition printed by the program.
 
 HTTP endpoint: `GET http://127.0.0.1:7243/api/v1/namespaces/time-skipping-sa-demo/workflows`.
 
-## Raw response example
+## Temporal CLI and tdbg
 
-Illustrative execution object for the `-true` example from `ListWorkflowExecutionsResponse.executions`:
-
-```json
-{
-  "execution": {
-    "workflowId": "sa-demo-1795544555134238000-true",
-    "runId": "01a20ecb-9e8b-77d0-b142-8f4ecda6ca55"
-  },
-  "type": {
-    "name": "TimeSkippingVisibilityDemo"
-  },
-  "startTime": "2026-11-24T18:22:35.147513Z",
-  "status": "WORKFLOW_EXECUTION_STATUS_RUNNING",
-  "executionTime": "2026-11-24T18:22:35.147513Z",
-  "memo": {},
-  "searchAttributes": {
-    "indexedFields": {
-      "BuildIds": {
-        "metadata": {
-          "encoding": "anNvbi9wbGFpbg==",
-          "type": "S2V5d29yZExpc3Q="
-        },
-        "data": "WyJ1bnZlcnNpb25lZCJd"
-      },
-      "TemporalTimeSkippingEnabled": {
-        "metadata": {
-          "encoding": "anNvbi9wbGFpbg==",
-          "type": "Qm9vbA=="
-        },
-        "data": "dHJ1ZQ=="
-      },
-      "TemporalTimeSkippingAccumulatedDuration": {
-        "metadata": {
-          "encoding": "anNvbi9wbGFpbg==",
-          "type": "SW50"
-        },
-        "data": "MA=="
-      }
-    }
-  },
-  "taskQueue": "sa-demo-1795544555134238000-true-workflow",
-  "rootExecution": {
-    "workflowId": "sa-demo-1795544555134238000-true",
-    "runId": "01a20ecb-9e8b-77d0-b142-8f4ecda6ca55"
-  }
-}
-```
-
-Payload metadata and data are byte fields, represented as Base64 in this HTTP response:
-
-| Field | Raw value | Base64-decoded value |
-| --- | --- | --- |
-| `metadata.encoding` | `anNvbi9wbGFpbg==` | `json/plain`: the data contains JSON |
-| `metadata.type` | `Qm9vbA==` | `Bool`: the search attribute type |
-| enabled `data` on `-true` | `dHJ1ZQ==` | `true` |
-| enabled `data` on `-false` | `ZmFsc2U=` | `false` |
-| duration `metadata.type` | `SW50` | `Int` |
-| duration `data` on `-true` | `MA==` | `0` nanoseconds |
-
-On `-missing`, both time-skipping search attribute entries are absent.
-
-## Temporal CLI and tdbg use cases
-
-### Temporal CLI
+List workflows that have skipped time and now have time skipping disabled:
 
 ```bash
-# Enabled config: matches -true and -skipped-completed.
 temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow list \
-  --query 'TemporalTimeSkippingEnabled = true'
-
-# Actually skipped time: matches both timer examples.
-temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow list \
-  --query 'TemporalTimeSkippingAccumulatedDuration > 0'
+  --query 'TimeSkippingEnabled = false AND TimeSkippingHasSkippedDuration = true'
 ```
 
-### tdbg
-
-Use a tdbg build that includes `visibility list`.
+Delete workflows that have skipped time:
 
 ```bash
-# Enabled config: matches -true and -skipped-completed.
-tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
-  --query 'TemporalTimeSkippingEnabled = true'
-
-# Actually skipped time: matches both timer examples.
-tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
-  --query 'TemporalTimeSkippingAccumulatedDuration > 0'
+temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow delete \
+  --query 'TimeSkippingHasSkippedDuration = true' \
+  --reason 'Delete workflows that skipped time'
 ```
 
-Both commands accept the same filters as the HTTP examples above: `TemporalTimeSkippingEnabled = false` matches `-false` and `-skipped-disabled`; `TemporalTimeSkippingEnabled IS NULL` matches only `-missing`.
-
-To find workflows that skipped time and are now disabled, use:
-
-```sql
-TemporalTimeSkippingAccumulatedDuration > 0 AND TemporalTimeSkippingEnabled = false
-```
-
-This matches `-skipped-disabled`. A zero accumulated duration does not indicate whether time skipping was enabled in the past.
-
-### Delete one demo group
-
-Use the exact group prefix printed by the program:
+Terminate workflows with time skipping enabled:
 
 ```bash
-temporal --address 127.0.0.1:7233 \
-  --namespace time-skipping-sa-demo workflow delete \
+temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow terminate \
+  --query 'TimeSkippingEnabled = true' \
+  --reason 'Terminate workflows with time skipping enabled'
+```
+
+List workflows that have skipped time with tdbg:
+
+```bash
+tdbg --address 127.0.0.1:7233 --namespace time-skipping-sa-demo visibility list \
+  --query 'TimeSkippingHasSkippedDuration = true'
+```
+
+## Delete one demo group
+
+Use the exact prefix printed by the program:
+
+```bash
+temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo workflow delete \
   --query "WorkflowId STARTS_WITH 'sa-demo-<printed-prefix>'" \
   --reason 'Local demo cleanup' --yes
-```
-
-This starts an asynchronous batch deletion for that demo group. Check progress using the printed job ID:
-
-```bash
-temporal --address 127.0.0.1:7233 --namespace time-skipping-sa-demo \
-  batch describe --job-id <job-id>
 ```
