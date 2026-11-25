@@ -74,6 +74,7 @@ func main() {
 		{name: "missing"},
 		{name: "false", config: &commonpb.TimeSkippingConfig{Enabled: false}},
 		{name: "true", config: &commonpb.TimeSkippingConfig{Enabled: true}},
+		{name: "skipped-enabled", config: &commonpb.TimeSkippingConfig{Enabled: true}, timer: true},
 		{name: "skipped-disabled", config: &commonpb.TimeSkippingConfig{Enabled: true, MaxSessionSkipCount: 1}, timer: true},
 		{name: "skipped-completed", config: &commonpb.TimeSkippingConfig{Enabled: true}, timer: true, complete: true},
 	}
@@ -209,9 +210,9 @@ func main() {
 		query string
 		count int64
 	}{
-		{"TimeSkippingEnabled = true", 2},
+		{"TimeSkippingEnabled = true", 3},
 		{"TimeSkippingEnabled = false", 2},
-		{"TimeSkippingHasSkippedDuration = true", 2},
+		{"TimeSkippingHasSkippedDuration = true", 3},
 		{"TimeSkippingHasSkippedDuration = false", 2},
 		{"TimeSkippingHasSkippedDuration IS NULL", 1},
 		{"TimeSkippingEnabled = false AND TimeSkippingHasSkippedDuration = true", 1},
@@ -234,7 +235,7 @@ func main() {
 		}))
 		fmt.Printf("Verified filter %s: %d workflows\n", filter.query, filter.count)
 	}
-	fmt.Println("Verified both boolean attributes and list/count filters for all five workflows.")
+	fmt.Println("Verified both boolean attributes and list/count filters for all six workflows.")
 	fmt.Printf("\nNamespace: %s; gRPC address: %s\n", *namespace, *address)
 	fmt.Printf("List this group separately:\n  NAMESPACE=%q ./list-workflows.sh %q\n", *namespace,
 		fmt.Sprintf("WorkflowId STARTS_WITH '%s'", prefix))
