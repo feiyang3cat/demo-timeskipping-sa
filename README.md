@@ -33,7 +33,7 @@ Namespace: `time-skipping-sa-demo`. The program creates five workflows, verifies
 
 The first three workflows wait on an unexecuted activity. The last two skip a one-hour timer. `-skipped-disabled` reaches `MaxSessionSkipCount = 1`, which disables skipping; its timer-fired workflow task remains unhandled. `-skipped-completed` handles that task and completes. Each workflow uses its own task queue.
 
-`TimeSkippingEnabled` indicates whether time skipping is currently enabled for the workflow. If it was enabled and is later disabled, either manually or automatically, this value becomes `false`. Workflow completion alone does not disable the configuration, so a completed workflow can still return `true`. `TimeSkippingHasSkippedDuration` is true when the mutable state's accumulated skipped duration is positive, including inherited skipped time. The numeric duration is not a visibility search attribute.
+`TimeSkippingEnabled` indicates whether time skipping is currently enabled for the workflow. If it was enabled and is later disabled, either manually or automatically, this value becomes `false`. Workflow completion alone does not disable the configuration, so a completed workflow can still return `true`. `TimeSkippingHasSkippedDuration` is true when the mutable state's accumulated skipped duration is positive, including inherited skipped time. This means the workflow uses a virtual clock ahead of wall-clock time, even if time skipping has since been disabled. The numeric duration is not a visibility search attribute.
 
 ## Storage and refresh behavior
 
